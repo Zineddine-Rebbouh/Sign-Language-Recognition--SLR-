@@ -1,0 +1,26 @@
+services:
+  api:
+    build: .
+    ports:
+      - "7860:7860"
+    environment:
+      - MODEL_CHECKPOINT=/app/checkpoints/best_model.pth
+    volumes:
+      # Mount the local checkpoints directory as read-only so the container
+      # can access the trained weights without baking them into the image.
+      - ./checkpoints:/app/checkpoints:ro
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.10.0
+    ports:
+      - "5000:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:///mlflow/mlflow.db
+      --default-artifact-root /mlflow/artifacts
+      --host 0.0.0.0 --port 5000
+
+volumes:
+  mlflow_data:

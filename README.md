@@ -1,149 +1,216 @@
-# Sign Language Recognition (SLR)
+# Sign Language Recognition (SLR) & MLOps System
 
-This repository contains a complete pipeline for Sign Language Recognition, capable of classifying 20 ASL gestures using a custom 3D Convolutional Neural Network (3D-CNN) that achieved **90.71% validation accuracy**.
+> Custom 3D-CNN achieving **90.71% validation accuracy** on 20 ASL gesture classes.
+> Upgraded into a complete **MLOps** ecosystem featuring MLflow tracking, automated CI/CD testing, FastAPI serving, and a Gradio frontend — all running in a single lightweight Docker container.
 
-The pipeline is built with a focus on real-time application, utilizing MediaPipe for dynamic hand region-of-interest (ROI) extraction and CLAHE for contrast enhancement before feeding a spatio-temporal tensor into the 3D-CNN.
+[![CI Pipeline](https://github.com/your-username/sign-language-recognition/actions/workflows/ci.yml/badge.svg)](https://github.com/your-username/sign-language-recognition/actions/workflows/ci.yml)
+[![Deployed on Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-Spaces-blue)](https://huggingface.co/spaces/YOUR_USERNAME/sign-language-api)
 
-## Features
+---
 
-- **Custom 14.3M parameter 3D-CNN**: Designed specifically for spatio-temporal gesture recognition.
-- **Robust Preprocessing Pipeline**: MediaPipe hand detection → Dynamic ROI cropping → CLAHE enhancement → Normalized tensor.
-- **Real-time Inference Application**: A fully functional webcam script (`realtime_inference.py`) that uses the exact same preprocessing pipeline as training to ensure zero domain shift.
-- **Strict Anti-Leakage Evaluation**: Video-level dataset splitting guarantees that frames from the same video never appear in both training and test sets.
-- **Modular Architectures**: Includes implementations of various model families (2D CNNs, CNN+LSTM, Transformers, ST-GCN, Traditional CV) for comparison and research purposes.
+## Table of Contents
+1. [Project Description](#project-description)
+2. [MLOps & Pipeline Architecture](#mlops--pipeline-architecture)
+3. [Repository Structure](#repository-structure)
+4. [Setup & Installation](#setup--installation)
+5. [Usage](#usage)
+6. [Deployment](#deployment)
+7. [Model Architecture](#model-architecture)
+8. [Known Limitations](#known-limitations)
 
-## Pipeline Architecture
+---
 
-The following flowchart illustrates the step-by-step pipeline used for both training the 3D-CNN and running real-time inference.
+## Project Description
+
+This project implements a robust Sign Language Recognition (SLR) system, graduating from a research script into a production-ready application. 
+
+### Core Machine Learning Principles
+- **No data leakage** — the train/val/test split is performed at the *video* level. No two frames from the same clip appear in different partitions.
+- **Preprocessing consistency** — the exact same `ImprovedVideoProcessor` class is used during training and real-time inference (via the API).
+- **Reproducibility** — every experiment is seeded (Python, NumPy, PyTorch, cuDNN). The seed is stored inside the checkpoint.
+
+### MLOps Principles Added
+- **Experiment Tracking**: Integrated **MLflow** to log hyperparameters, metrics, and models.
+- **Unified Serving**: **FastAPI** provides a robust REST API for developers, while **Gradio** provides a beautiful web UI for users. Both run on the same server.
+- **Containerization**: A multi-stage **Docker** build separates compilation from runtime, keeping the image slim while satisfying tricky OpenCV system dependencies (`libgl1-mesa-glx`).
+- **CI/CD**: **GitHub Actions** automatically runs Pytest suites and smoke-tests the Docker container on every pull request.
+
+---
+
+## MLOps & Pipeline Architecture
 
 ```mermaid
 flowchart TD
     %% Define styles
-    classDef data fill:#e1f5fe,stroke:#0288d1,stroke-width:2px;
-    classDef process fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px;
-    classDef model fill:#e8f5e9,stroke:#388e3c,stroke-width:2px;
-    classDef eval fill:#fff3e0,stroke:#f57c00,stroke-width:2px;
+    classDef data fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#000;
+    classDef process fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000;
+    classDef model fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#000;
+    classDef deploy fill:#fff3e0,stroke:#f57c00,stroke-width:2px,color:#000;
+    classDef infra fill:#ffebee,stroke:#c62828,stroke-width:2px,color:#000;
 
-    %% Data Sources
-    RawData[("Raw Video Dataset<br>(ASL-20)")]:::data
-    Webcam[("Live Webcam Feed")]:::data
-
-    %% Preprocessing Pipeline
-    subgraph Preprocessing["Consistent Preprocessing Pipeline"]
-        direction TB
-        MP["MediaPipe Hand Detection"]:::process
-        ROI["ROI Cropping (Padding added)"]:::process
-        CLAHE["CLAHE Contrast Enhancement"]:::process
-        Resize["Resize & Normalize (112x112, 30 frames)"]:::process
+    subgraph Development Pipeline
+        RawData[("Raw Videos<br>(ASL-20)")]:::data
+        Split["Video-Level Split<br>(70/15/15)"]:::process
+        Train["scripts/train.py<br>Model Training"]:::model
+        MLflow[("MLflow Tracking<br>(Metrics, Params, Artifacts)")]:::infra
         
-        MP --> ROI --> CLAHE --> Resize
+        RawData --> Split --> Train
+        Train <--> MLflow
+        Train -- "Saves best_model.pth" --> Checkpoints[("Checkpoints")]:::data
     end
 
-    %% Training Flow
-    Split["Video-Level Stratified Split<br>(Train/Val/Test)"]:::process
-    RawData --> Split
-    Split -- "Extract Frames" --> Preprocessing
-    
-    %% Model
-    CNN["Custom 3D-CNN<br>(14.3M Parameters)"]:::model
-    Resize -- "Tensor (B, C, T, H, W)" --> CNN
+    subgraph Production Docker Container (Port 7860)
+        direction TB
+        GradioUI["Gradio UI<br>(/ root)"]:::deploy
+        FastAPI["FastAPI REST<br>(/api/predict)"]:::deploy
+        ModelService["ModelService<br>(Loads Model Once)"]:::process
+        Preprocessing["ImprovedVideoProcessor<br>(MediaPipe ROI, CLAHE, Resize)"]:::process
+        
+        GradioUI -- "In-process call" --> ModelService
+        FastAPI -- "Dependency Injection" --> ModelService
+        ModelService --> Preprocessing
+    end
 
-    %% Evaluation
-    Metrics["Evaluation Metrics<br>(Accuracy, Confusion Matrix)"]:::eval
-    CNN -- "Predictions" --> Metrics
-    
-    %% Inference Flow
-    Webcam --> Preprocessing
+    subgraph CI/CD (GitHub Actions)
+        Pytest["Unit Tests<br>(tests/)"]:::process
+        SmokeTest["Docker Build & Smoke Test<br>(curl /health)"]:::process
+    end
+
+    Checkpoints -. "Mounted/Copied" .-> ModelService
+    User((User/Recruiter)) --> GradioUI
+    Dev((Developer)) --> FastAPI
 ```
+
+---
 
 ## Repository Structure
 
 ```text
-watermark-embedding-system/
-├── data/
-│   ├── raw/                    # Original, immutable datasets
-│   ├── processed/              # Cleaned/preprocessed datasets
-│   ├── train/                  # Training split
-│   ├── val/                    # Validation split
-│   └── test/                   # Test split
-├── notebooks/                  
-│   ├── 1.0-hog-svm-baseline.ipynb # HOG+SVM Baseline
-│   └── 2.0-3dcnn-mediapipe.ipynb  # 3D CNN implementation
-├── checkpoints/                # Saved model weights (.pth)
-├── logs/                       # Training logs
-├── results/                    
-│   ├── figures/                # Output plots and confusion matrices
-│   └── metrics/                # JSON metrics and evaluation reports
-├── models/                     # Architectures (2D CNN, Sequence, Spatiotemporal, Transformers, Keypoint)
-├── realtime_inference.py       # Live webcam inference script
-├── train.py                    # Main training script for the 3D-CNN
-├── evaluate_checkpoint.py      # Script to evaluate a saved checkpoint on the test set
-├── preprocessing.py            # MediaPipe + CLAHE video processing logic
-├── dataset.py                  # PyTorch Dataset for loading video tensors
-├── utils_video.py              # Frame extraction and dataset splitting utilities
-├── baseline_hog_svm.py         # Script to run the HOG+SVM traditional baseline
-├── compare_models.py           # Utility to compare metrics across different runs
-├── config_template.yaml        # Configuration file for experiments
-└── requirements.txt            # Dependency list
+.
+├── api/                        # FastAPI Serving Package
+│   ├── __init__.py
+│   ├── inference.py            # ModelService (connects API to ML logic)
+│   ├── main.py                 # FastAPI & Gradio endpoints
+│   └── schemas.py              # Pydantic validation models
+├── checkpoints/                # Saved .pth weights
+├── data/                       # Datasets
+├── notebooks/                  # Research notebooks
+├── scripts/                    # Entry-point runner scripts
+│   ├── train.py                # Train 3D-CNN (MLflow enabled)
+│   ├── evaluate_checkpoint.py  
+│   └── realtime_inference.py   # Live webcam demo
+├── src/                        # Core ML logic (Importable)
+│   ├── dataset.py              
+│   ├── evaluate.py             
+│   ├── model_3dcnn.py          # 14.3M param architecture
+│   ├── preprocessing.py        # Video Processor (Shared by API & Train)
+│   └── utils_video.py          
+├── tests/                      # Pytest suite
+│   ├── test_api.py             # Endpoint tests
+│   ├── test_model.py           # Architecture tensor tests
+│   └── test_preprocessing.py   # Tensor shape validation
+├── .github/workflows/          # CI/CD configuration
+│   └── ci.yml                  
+├── app.py                      # Gradio Frontend definition
+├── Dockerfile                  # Multi-stage production container
+├── docker-compose.yml          # Local development stack
+├── requirements.txt            
+└── README.md
 ```
+
+---
 
 ## Setup & Installation
 
-1. Clone the repository and install the requirements:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Download your dataset (e.g., `ASL-20-Words-Dataset-V1`) and place it in `data/raw/`.
-3. Extract it so that each class has its own folder (e.g., `data/raw/class_name/video.mp4`).
+### Local Python Environment
+
+```bash
+git clone https://github.com/your-username/sign-language-recognition.git
+cd sign-language-recognition
+pip install -r requirements.txt
+```
+
+*(Note: CPU users can save bandwidth by installing the CPU version of PyTorch first: `pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu`)*
+
+### Local Docker Environment (Recommended)
+
+To spin up the API and MLflow tracking server locally:
+
+```bash
+docker compose up -d --build
+```
+- API & Gradio UI: `http://localhost:7860`
+- API Docs (Swagger): `http://localhost:7860/docs`
+- MLflow UI: `http://localhost:5000`
+
+---
 
 ## Usage
 
-### 1. Training the 3D-CNN
+### 1. Training with MLflow
 
-To train the 3D-CNN model on your dataset:
-
-```bash
-python train.py \
-    --dataset_root ./data/raw/Full\ Data \
-    --output_dir ./checkpoints \
-    --epochs 50 \
-    --batch_size 8 \
-    --lr 0.001
-```
-
-### 2. Evaluating a Checkpoint
-
-To evaluate a trained model and generate a confusion matrix:
+Training is fully tracked by MLflow automatically.
 
 ```bash
-python evaluate_checkpoint.py \
-    --checkpoint ./checkpoints/best_model.pth \
-    --dataset_root ./data/raw/Full\ Data \
-    --output_dir ./results/metrics
+python scripts/train.py \
+    --dataset_root "./data/raw/Full Data" \
+    --epochs 50 --batch_size 8 \
+    --experiment_name "SLR-3DCNN" \
+    --run_test  # Evaluates on the test set at the end
 ```
 
-### 3. Real-time Inference (Webcam)
+View the learning curves, hyperparameters, and confusion matrices by opening `http://localhost:5000` (if running docker compose) or `mlflow ui --backend-store-uri ./mlruns`.
 
-Run the real-time recognition demo using your webcam:
+### 2. Testing Locally
 
 ```bash
-python realtime_inference.py \
-    --checkpoint ./checkpoints/best_model.pth \
-    --camera 0 \
-    --threshold 0.6
+# Run unit tests
+pytest tests/ -v
 ```
 
-### 4. Running the HOG+SVM Baseline
+---
 
-To compare against a traditional computer vision approach:
+## Deployment
 
-```bash
-python baseline_hog_svm.py \
-    --dataset_root ./data/raw/Full\ Data \
-    --output_dir ./results/baseline \
-    --kernel linear
-```
+This system is designed for instant, free deployment to **Hugging Face Spaces** using the Docker SDK.
 
-## Acknowledgements
+1. Create a new Space on [Hugging Face](https://huggingface.co/spaces).
+2. Select **Docker** as the SDK.
+3. Link the remote and push:
+   ```bash
+   git remote add huggingface https://huggingface.co/spaces/YOUR_USERNAME/sign-language-api
+   git push huggingface main
+   ```
+4. HF Spaces will automatically build the `Dockerfile` and expose port `7860`. The Gradio UI will be visible immediately, and the REST API will be available for remote calls.
 
-This project was built as part of an M.Sc. thesis/tutorial on Sign Language Recognition, covering the spectrum from traditional HOG+SVM to state-of-the-art Transformers and ST-GCNs.
+---
+
+## Model Architecture
+
+### Improved3DCNN (14.3 M parameters)
+
+| Layer block | Output shape | Notes |
+|-------------|-------------|-------|
+| Input | (B, 3, 30, 112, 112) | RGB × frames × H × W |
+| Conv3D block 1 | (B, 64, 30, 56, 56) | 3×3×3 conv, BN, ReLU, MaxPool(1,2,2) |
+| Conv3D block 2 | (B, 128, 15, 28, 28) | MaxPool(2,2,2) |
+| Conv3D block 3 | (B, 256, 7, 14, 14) | Two 3×3×3 conv layers |
+| Conv3D block 4 | (B, 512, 3, 7, 7) | Two 3×3×3 conv layers |
+| Conv3D block 5 | (B, 512, 1, 3, 3) | Two 3×3×3 conv layers |
+| AdaptiveAvgPool3d | (B, 512) | Flattened |
+| Classifier | (B, 20) | Final logits |
+
+**Design decisions:**
+- **3D convolutions** capture both spatial hand shape AND temporal motion trajectory simultaneously.
+- **Label smoothing (ε=0.1)** prevents overconfident predictions.
+- **Cosine LR annealing** smoothly reduces the learning rate.
+
+> The model achieved **90.71% validation accuracy** on the ASL-20 dataset. To reproduce exactly, run `scripts/train.py` with `--seed 42`.
+
+---
+
+## Known Limitations
+
+1. **No temporal augmentation** — The dataset is small (~20 classes × N videos). Augmentations like random frame drops or speed changes could improve generalisation.
+2. **Single-hand only** — `HandDetector` extracts one bounding box encompassing all detected hands; two-handed signs may be sub-optimally cropped.
+3. **Real-time CPU latency** — On CPU, 3D convolutions over 30 frames are slow (~2–4 FPS). For large scale deployment, consider model quantisation (`torch.quantization`) or converting to ONNX + TensorRT.

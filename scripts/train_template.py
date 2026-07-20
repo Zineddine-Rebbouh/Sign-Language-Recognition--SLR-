@@ -19,9 +19,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from models import get_2d_cnn_model  # Or import your sequence/3D models
-from evaluate import evaluate_model
-# from dataset import SLRDataset # (Example: implement your own Dataset)
+from src.models import get_2d_cnn_model  # Or import your sequence/3D models
+from src.evaluate import evaluate_model
+# from src.dataset import SLRDataset # (Example: implement your own Dataset)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

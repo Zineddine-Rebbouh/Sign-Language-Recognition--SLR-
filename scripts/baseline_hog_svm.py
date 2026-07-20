@@ -19,6 +19,7 @@ The dataset is expected to follow the folder structure::
 import argparse
 import logging
 import pickle
+import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -28,8 +29,13 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from tqdm import tqdm
 
-from evaluate import evaluate_model, save_results
-from utils_video import (
+# ── Bootstrap sys.path so `src` imports work from any directory ──
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.evaluate import evaluate_model, save_results
+from src.utils_video import (
     extract_frames,
     get_video_statistics,
     preprocess_frame,

@@ -1,0 +1,30 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+
+# Project specific
+data/
+mlruns/
+mlartifacts/
+notebooks/
+results/
+tests/
+logs/
+checkpoints/*.pth
+checkpoints/*.pt
+config.yaml

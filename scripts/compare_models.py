@@ -1,15 +1,25 @@
 """
 Model comparison script for Sign Language Recognition.
 Compares all trained models and generates summary reports.
+
+Run from the project root:
+    python scripts/compare_models.py --results_dir ./results/metrics --output_dir ./results/figures
 """
 
 import json
-import pandas as pd
+import sys
 from pathlib import Path
 from typing import List, Dict, Optional
 import logging
+import matplotlib
+matplotlib.use("Agg")  # headless — safe for servers without a display
 import matplotlib.pyplot as plt
 import seaborn as sns
+
+# ── Bootstrap sys.path so `src` imports work from any directory ──
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

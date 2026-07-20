@@ -1,0 +1,66 @@
+name: CI Pipeline
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  lint-and-test:
+    name: Run Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # PyTorch CPU version is much smaller/faster for CI than default CUDA version
+          pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements.txt
+
+      - name: Run Pytest
+        run: |
+          # We use --tb=short for cleaner CI logs
+          python -m pytest tests/ -v --tb=short
+
+  docker-build-and-smoke:
+    name: Build & Smoke Test Docker Image
+    runs-on: ubuntu-latest
+    needs: lint-and-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t slr-api:ci-test .
+
+      - name: Smoke test API Health
+        run: |
+          # Start the container in the background
+          docker run -d --name slr-container -p 7860:7860 slr-api:ci-test
+          
+          # Wait for uvicorn to initialize
+          echo "Waiting for FastAPI to start..."
+          sleep 15
+          
+          # Ping the health endpoint. The --fail flag ensures curl returns a non-zero exit 
+          # code if the HTTP status is 4xx or 5xx, which will properly fail the CI step.
+          echo "Curling /health endpoint..."
+          curl --fail http://localhost:7860/health
+          
+          # Output logs for debugging if it succeeds or fails
+          echo "--- Container Logs ---"
+          docker logs slr-container
+          
+          # Clean up
+          docker stop slr-container
+          docker rm slr-container
