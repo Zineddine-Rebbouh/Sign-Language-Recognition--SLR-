@@ -1,258 +1,347 @@
 """
-Baseline Sign Language Recognition using HOG + SVM.
-Phase 1: Mandatory baseline model.
+Baseline Sign Language Recognition: HOG + SVM.
+
+Group 1 (Phase 1) — Mandatory baseline.
+
+Usage
+-----
+python baseline_hog_svm.py --dataset_root /path/to/dataset --output_dir ./results/baseline
+
+The dataset is expected to follow the folder structure::
+
+    dataset_root/
+        class_a/
+            video1.mp4
+        class_b/
+            video1.mp4
 """
 
-import numpy as np
-from pathlib import Path
-from typing import List, Tuple, Optional
+import argparse
 import logging
 import pickle
-from tqdm import tqdm
-from sklearn.svm import SVC
-from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
+from pathlib import Path
+from typing import List, Optional, Tuple
+
 import cv2
+import numpy as np
+from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
+from tqdm import tqdm
 
-from utils_video import load_video_dataset, preprocess_frame
 from evaluate import evaluate_model, save_results
+from utils_video import (
+    extract_frames,
+    get_video_statistics,
+    preprocess_frame,
+    split_dataset,
+)
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# HOG feature extraction
+# ---------------------------------------------------------------------------
 
 def extract_hog_features(
     frames: List[np.ndarray],
     orientations: int = 9,
     pixels_per_cell: Tuple[int, int] = (8, 8),
-    cells_per_block: Tuple[int, int] = (2, 2)
+    cells_per_block: Tuple[int, int] = (2, 2),
 ) -> np.ndarray:
-    """
-    Extract HOG (Histogram of Oriented Gradients) features from frames.
-    
+    """Extract HOG descriptors from a list of frames.
+
     Args:
-        frames: List of preprocessed frames
-        orientations: Number of orientation bins
-        pixels_per_cell: Size of a cell in pixels
-        cells_per_block: Number of cells in each block
-    
+        frames:          List of preprocessed frames (float32 [0,1] or uint8).
+        orientations:    Number of gradient orientation bins.
+        pixels_per_cell: Cell size in pixels.
+        cells_per_block: Number of cells per normalisation block.
+
     Returns:
-        Array of HOG features (n_samples, n_features)
+        HOG feature matrix of shape (n_frames, n_features).
     """
+    h, w = frames[0].shape[:2]
     hog = cv2.HOGDescriptor(
-        _winSize=(frames[0].shape[1], frames[0].shape[0]),
-        _blockSize=(cells_per_block[0] * pixels_per_cell[0],
-                    cells_per_block[1] * pixels_per_cell[1]),
+        _winSize=(w, h),
+        _blockSize=(
+            cells_per_block[0] * pixels_per_cell[0],
+            cells_per_block[1] * pixels_per_cell[1],
+        ),
         _blockStride=(pixels_per_cell[0], pixels_per_cell[1]),
         _cellSize=(pixels_per_cell[0], pixels_per_cell[1]),
-        _nbins=orientations
+        _nbins=orientations,
     )
-    
-    features = []
-    for frame in tqdm(frames, desc="Extracting HOG features"):
-        # Convert to uint8 if normalized
-        if frame.dtype == np.float32 or frame.dtype == np.float64:
-            frame = (frame * 255).astype(np.uint8)
-        
-        # Compute HOG descriptor
-        hog_features = hog.compute(frame)
-        features.append(hog_features.flatten())
-    
-    return np.array(features)
 
+    features = []
+    for frame in tqdm(frames, desc="HOG extraction", leave=False):
+        if frame.dtype != np.uint8:
+            frame = (np.clip(frame, 0, 1) * 255).astype(np.uint8)
+        features.append(hog.compute(frame).flatten())
+
+    return np.array(features, dtype=np.float32)
+
+
+# ---------------------------------------------------------------------------
+# Frame loading with video-level split
+# ---------------------------------------------------------------------------
+
+def _load_frames_from_items(
+    items: List[Tuple[Path, int]],
+    max_frames_per_video: int,
+    frame_skip: int,
+    target_size: Tuple[int, int],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Load and preprocess frames from a list of (video_path, label) items.
+
+    Args:
+        items:                List of (video_path, class_idx) tuples.
+        max_frames_per_video: Maximum frames per video.
+        frame_skip:           Sample every Nth frame.
+        target_size:          (width, height) for frame resizing.
+
+    Returns:
+        (frames_array, labels_array)
+    """
+    all_frames: List[np.ndarray] = []
+    all_labels: List[int] = []
+
+    for video_path, label in tqdm(items, desc="Loading videos"):
+        raw_frames = extract_frames(
+            video_path,
+            max_frames=max_frames_per_video,
+            frame_skip=frame_skip,
+            target_size=target_size,
+        )
+        if not raw_frames:
+            logger.warning(f"Skipping (no frames): {video_path}")
+            continue
+
+        processed = [
+            preprocess_frame(f, target_size=target_size, normalize=True)
+            for f in raw_frames
+        ]
+        all_frames.extend(processed)
+        all_labels.extend([label] * len(processed))
+
+    return np.array(all_frames), np.array(all_labels)
+
+
+# ---------------------------------------------------------------------------
+# Main training function
+# ---------------------------------------------------------------------------
 
 def train_baseline_hog_svm(
     dataset_root: Path,
     output_dir: Path,
-    kernel: str = 'linear',
+    kernel: str = "linear",
     C: float = 1.0,
-    gamma: Optional[str] = 'scale',
+    gamma: str = "scale",
     max_videos_per_class: Optional[int] = None,
-    max_frames_per_video: Optional[int] = 10,
+    max_frames_per_video: int = 10,
     frame_skip: int = 5,
     target_size: Tuple[int, int] = (64, 64),
-    test_size: float = 0.2,
+    val_size: float = 0.15,
+    test_size: float = 0.15,
     random_state: int = 42,
     hog_orientations: int = 9,
     hog_pixels_per_cell: Tuple[int, int] = (8, 8),
-    hog_cells_per_block: Tuple[int, int] = (2, 2)
+    hog_cells_per_block: Tuple[int, int] = (2, 2),
 ) -> dict:
-    """
-    Train baseline HOG + SVM model.
-    
+    """Train and evaluate a HOG + SVM baseline model.
+
+    The dataset is split at the **video** level before frame extraction
+    so that no video contributes frames to more than one partition
+    (avoiding data leakage).
+
     Args:
-        dataset_root: Root directory of WLASL dataset
-        output_dir: Directory to save model and results
-        kernel: SVM kernel ('linear' or 'rbf')
-        C: SVM regularization parameter
-        gamma: SVM gamma parameter (for RBF kernel)
-        max_videos_per_class: Maximum videos per class
-        max_frames_per_video: Maximum frames per video
-        frame_skip: Extract every Nth frame
-        target_size: Target frame size
-        test_size: Test set fraction
-        random_state: Random seed
-        hog_orientations: HOG orientations
-        hog_pixels_per_cell: HOG pixels per cell
-        hog_cells_per_block: HOG cells per block
-    
+        dataset_root:         Root directory of the dataset.
+        output_dir:           Directory to save model, scaler, and results.
+        kernel:               SVM kernel: 'linear' or 'rbf'.
+        C:                    SVM regularisation parameter.
+        gamma:                SVM gamma (RBF only): 'scale' or 'auto'.
+        max_videos_per_class: Cap on videos per class (None = all).
+        max_frames_per_video: Maximum frames extracted per video.
+        frame_skip:           Sample every Nth frame.
+        target_size:          (width, height) for frame resizing.
+        val_size:             Fraction of videos for validation.
+        test_size:            Fraction of videos for test.
+        random_state:         RNG seed for reproducibility.
+        hog_orientations:     HOG orientation bins.
+        hog_pixels_per_cell:  HOG cell size in pixels.
+        hog_cells_per_block:  HOG block size in cells.
+
     Returns:
-        Dictionary with results and model info
+        Dictionary with evaluation metrics and saved model paths.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     logger.info("=" * 60)
-    logger.info("BASELINE MODEL: HOG + SVM")
+    logger.info("BASELINE: HOG + SVM")
     logger.info("=" * 60)
-    logger.info(f"Kernel: {kernel}")
-    logger.info(f"C: {C}")
-    logger.info(f"Gamma: {gamma}")
-    
-    # Load dataset
-    logger.info("\nLoading video dataset...")
-    frames, labels, video_paths = load_video_dataset(
-        dataset_root=dataset_root,
+    logger.info(f"  dataset:  {dataset_root}")
+    logger.info(f"  kernel:   {kernel}  C={C}  gamma={gamma}")
+    logger.info(f"  target:   {target_size}  frames/video: {max_frames_per_video}")
+
+    # --- Dataset statistics ---
+    stats = get_video_statistics(dataset_root)
+    logger.info(f"\nDataset: {stats['num_classes']} classes, {stats['total_videos']} videos")
+
+    # --- Video-level split (prevents frame leakage) ---
+    logger.info("\nSplitting dataset at video level...")
+    train_items, val_items, test_items, idx_to_class = split_dataset(
+        dataset_root,
         max_videos_per_class=max_videos_per_class,
-        max_frames_per_video=max_frames_per_video,
-        frame_skip=frame_skip,
-        target_size=target_size
-    )
-    
-    if len(frames) == 0:
-        logger.error("No frames loaded! Check dataset path.")
-        return {}
-    
-    frames_array = np.array(frames)
-    labels_array = np.array(labels)
-    
-    logger.info(f"Loaded {len(frames_array)} frames")
-    logger.info(f"Number of classes: {len(np.unique(labels_array))}")
-    
-    # Extract HOG features
-    logger.info("\nExtracting HOG features...")
-    hog_features = extract_hog_features(
-        frames_array,
-        orientations=hog_orientations,
-        pixels_per_cell=hog_pixels_per_cell,
-        cells_per_block=hog_cells_per_block
-    )
-    
-    logger.info(f"HOG feature shape: {hog_features.shape}")
-    
-    # Split train/test
-    logger.info("\nSplitting train/test sets...")
-    X_train, X_test, y_train, y_test = train_test_split(
-        hog_features, labels_array,
+        val_size=val_size,
         test_size=test_size,
         random_state=random_state,
-        stratify=labels_array
     )
-    
-    logger.info(f"Train set: {len(X_train)} samples")
-    logger.info(f"Test set: {len(X_test)} samples")
-    
-    # Normalize features
-    logger.info("\nNormalizing features...")
+
+    # --- Load frames per split ---
+    logger.info("\nLoading train frames...")
+    X_train_raw, y_train = _load_frames_from_items(
+        train_items, max_frames_per_video, frame_skip, target_size
+    )
+    logger.info(f"  Train: {len(X_train_raw)} frames")
+
+    logger.info("Loading test frames...")
+    X_test_raw, y_test = _load_frames_from_items(
+        test_items, max_frames_per_video, frame_skip, target_size
+    )
+    logger.info(f"  Test: {len(X_test_raw)} frames")
+
+    if len(X_train_raw) == 0:
+        logger.error("No training frames loaded. Check dataset path.")
+        return {}
+
+    # --- HOG feature extraction ---
+    logger.info("\nExtracting HOG features...")
+    X_train_hog = extract_hog_features(
+        list(X_train_raw), hog_orientations, hog_pixels_per_cell, hog_cells_per_block
+    )
+    X_test_hog = extract_hog_features(
+        list(X_test_raw), hog_orientations, hog_pixels_per_cell, hog_cells_per_block
+    )
+    logger.info(f"  HOG feature dim: {X_train_hog.shape[1]}")
+
+    # --- Feature normalisation ---
     scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    
-    # Train SVM
-    logger.info(f"\nTraining SVM with {kernel} kernel...")
-    svm_params = {'C': C, 'random_state': random_state}
-    if kernel == 'rbf':
-        svm_params['gamma'] = gamma
-    
-    svm = SVC(kernel=kernel, **svm_params, probability=True)
+    X_train_scaled = scaler.fit_transform(X_train_hog)
+    X_test_scaled = scaler.transform(X_test_hog)
+
+    # --- Train SVM ---
+    logger.info(f"\nTraining SVM ({kernel} kernel)...")
+    svm_params: dict = {"C": C, "random_state": random_state, "probability": True}
+    if kernel == "rbf":
+        svm_params["gamma"] = gamma
+    svm = SVC(kernel=kernel, **svm_params)
     svm.fit(X_train_scaled, y_train)
-    
-    logger.info("Training completed!")
-    
-    # Evaluate
-    logger.info("\nEvaluating model...")
+    logger.info("  Training complete.")
+
+    # --- Evaluate ---
+    class_names = [idx_to_class[i] for i in sorted(idx_to_class)]
     results = evaluate_model(
         model=svm,
         X_test=X_test_scaled,
         y_test=y_test,
-        scaler=scaler,
         model_name=f"HOG_SVM_{kernel}",
-        class_names=None  # Will be inferred
+        class_names=class_names,
+        save_dir=output_dir,
     )
-    
-    # Save model and scaler
+
+    # --- Save model + scaler ---
     model_path = output_dir / f"hog_svm_{kernel}.pkl"
     scaler_path = output_dir / f"hog_svm_{kernel}_scaler.pkl"
-    
-    with open(model_path, 'wb') as f:
+
+    with open(model_path, "wb") as f:
         pickle.dump(svm, f)
-    
-    with open(scaler_path, 'wb') as f:
+    with open(scaler_path, "wb") as f:
         pickle.dump(scaler, f)
-    
-    logger.info(f"\nModel saved to: {model_path}")
-    logger.info(f"Scaler saved to: {scaler_path}")
-    
-    # Save results
+
+    logger.info(f"\nModel saved:  {model_path}")
+    logger.info(f"Scaler saved: {scaler_path}")
+
+    # --- Save results ---
+    results["model_path"] = str(model_path)
+    results["scaler_path"] = str(scaler_path)
+    results["split_info"] = {
+        "train_videos": len(train_items),
+        "val_videos": len(val_items),
+        "test_videos": len(test_items),
+        "random_state": random_state,
+        "note": "Split performed at video level to prevent frame-leakage.",
+    }
+    results["hog_params"] = {
+        "orientations": hog_orientations,
+        "pixels_per_cell": hog_pixels_per_cell,
+        "cells_per_block": hog_cells_per_block,
+    }
+    results["svm_params"] = {"kernel": kernel, "C": C, "gamma": gamma}
+
     results_path = output_dir / f"hog_svm_{kernel}_results.json"
     save_results(results, results_path)
-    
-    results['model_path'] = str(model_path)
-    results['scaler_path'] = str(scaler_path)
-    results['hog_params'] = {
-        'orientations': hog_orientations,
-        'pixels_per_cell': hog_pixels_per_cell,
-        'cells_per_block': hog_cells_per_block
-    }
-    results['svm_params'] = {
-        'kernel': kernel,
-        'C': C,
-        'gamma': gamma
-    }
-    
+
     return results
 
 
-if __name__ == "__main__":
-    # Example usage for Kaggle
-    import sys
-    
-    # Kaggle paths
-    DATASET_ROOT = Path("/kaggle/input/wlasl-processed")
-    OUTPUT_DIR = Path("/kaggle/working/baseline_hog_svm")
-    
-    # For testing, you can override paths
-    if len(sys.argv) > 1:
-        DATASET_ROOT = Path(sys.argv[1])
-    if len(sys.argv) > 2:
-        OUTPUT_DIR = Path(sys.argv[2])
-    
-    # Train with linear kernel
-    logger.info("Training with LINEAR kernel...")
-    results_linear = train_baseline_hog_svm(
-        dataset_root=DATASET_ROOT,
-        output_dir=OUTPUT_DIR / "linear",
-        kernel='linear',
-        C=1.0,
-        max_videos_per_class=50,  # Limit for faster training
-        max_frames_per_video=10,
-        frame_skip=5
-    )
-    
-    # Train with RBF kernel
-    logger.info("\n\nTraining with RBF kernel...")
-    results_rbf = train_baseline_hog_svm(
-        dataset_root=DATASET_ROOT,
-        output_dir=OUTPUT_DIR / "rbf",
-        kernel='rbf',
-        C=1.0,
-        gamma='scale',
-        max_videos_per_class=50,
-        max_frames_per_video=10,
-        frame_skip=5
-    )
-    
-    logger.info("\n" + "=" * 60)
-    logger.info("BASELINE TRAINING COMPLETE")
-    logger.info("=" * 60)
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="HOG + SVM baseline for Sign Language Recognition."
+    )
+    parser.add_argument(
+        "--dataset_root", type=Path, required=True,
+        help="Root directory of the dataset (class-per-folder structure).",
+    )
+    parser.add_argument(
+        "--output_dir", type=Path, default=Path("./results/baseline"),
+        help="Directory to save model, scaler, and evaluation results.",
+    )
+    parser.add_argument(
+        "--kernel", choices=["linear", "rbf"], default="linear",
+        help="SVM kernel (default: linear).",
+    )
+    parser.add_argument("--C", type=float, default=1.0, help="SVM C (default: 1.0).")
+    parser.add_argument("--gamma", default="scale", help="SVM gamma for RBF (default: scale).")
+    parser.add_argument(
+        "--max_videos_per_class", type=int, default=None,
+        help="Cap on videos per class for quick experiments.",
+    )
+    parser.add_argument("--max_frames_per_video", type=int, default=10)
+    parser.add_argument("--frame_skip", type=int, default=5)
+    parser.add_argument("--target_size", type=int, nargs=2, default=[64, 64],
+                        metavar=("W", "H"))
+    parser.add_argument("--val_size", type=float, default=0.15)
+    parser.add_argument("--test_size", type=float, default=0.15)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--both_kernels", action="store_true",
+        help="Train with both linear and RBF kernels.",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = _parse_args()
+    kernels = ["linear", "rbf"] if args.both_kernels else [args.kernel]
+
+    for k in kernels:
+        logger.info(f"\n{'='*60}\nKernel: {k.upper()}\n{'='*60}")
+        train_baseline_hog_svm(
+            dataset_root=args.dataset_root,
+            output_dir=args.output_dir / k,
+            kernel=k,
+            C=args.C,
+            gamma=args.gamma,
+            max_videos_per_class=args.max_videos_per_class,
+            max_frames_per_video=args.max_frames_per_video,
+            frame_skip=args.frame_skip,
+            target_size=tuple(args.target_size),
+            val_size=args.val_size,
+            test_size=args.test_size,
+            random_state=args.seed,
+        )

@@ -1,50 +1,35 @@
-# Configuration template for Sign Language Recognition models
-# Copy and modify this file for each model experiment
+# -----------------------------------------------------------------------------
+# Sign Language Recognition - Configuration Template
+# -----------------------------------------------------------------------------
 
-# Model configuration
-model:
-  name: "resnet18"  # Model name (vgg11, resnet18, mobilenet, etc.)
-  num_classes: 100  # Number of sign language classes
-  pretrained: true  # Use pretrained weights
-  
-# Data configuration
 data:
-  dataset_root: "/kaggle/input/wlasl-processed"
-  max_videos_per_class: 50
-  max_frames_per_video: 16
-  frame_skip: 2
-  target_size: [224, 224]  # [width, height]
-  batch_size: 32
+  dataset_root: "./data/raw/ASL-20-Words-Dataset-V1/Full Data"
+  target_size: [112, 112]
+  num_frames: 30
+  batch_size: 8
   num_workers: 4
-  train_val_split: 0.2
+  val_size: 0.15
+  test_size: 0.15
+
+model:
+  name: "improved3dcnn"    # See models/__init__.py for other options
+  num_classes: 20
+  pretrained: true
+  dropout_rate: 0.5
   
-# Training configuration
 training:
   num_epochs: 50
   learning_rate: 0.001
   weight_decay: 0.0001
-  optimizer: "adam"  # adam, sgd
-  scheduler: "cosine"  # cosine, step, plateau
   early_stopping_patience: 10
-  save_best_only: true
+  seed: 42
   
-# Advanced training options
 advanced:
-  mixed_precision: true  # Use fp16
-  gradient_clip: 1.0
-  warmup_epochs: 5
+  mixed_precision: true
+  use_hand_detection: true
   
-# Logging and output
 output:
-  output_dir: "/kaggle/working/slr_results"
-  log_dir: "/kaggle/working/slr_results/logs"
-  model_dir: "/kaggle/working/slr_results/models"
-  runs_dir: "/kaggle/working/slr_results/runs"
-  experiment_name: "resnet18_baseline"
-  
-# Evaluation
-evaluation:
-  metrics: ["accuracy", "top_5_accuracy", "precision", "recall", "f1_score"]
-  save_confusion_matrix: true
-  save_predictions: false
-
+  experiment_name: "3dcnn_asl20"
+  output_dir: "./results"
+  model_dir: "./checkpoints"
+  log_dir: "./logs"
